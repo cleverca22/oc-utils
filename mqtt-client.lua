@@ -1,4 +1,6 @@
+local colors = require("colors")
 local component = require("component")
+local computer = require("computer")
 local event = require "event"
 local internet = require("internet")
 local json = require("json")
@@ -102,13 +104,13 @@ end
 
 --process_one_packet(handle)
 
-local mqtt = mqttLib:new("10.0.0.11", 1883, "oc", "hunter2")
+local mqtt = mqttLib:new("10.0.0.11", 1883, "oc", "hunter2", computer.address(), 600)
 
-local function get_device()
+local function get_device(addr)
   local dev = {}
-  dev["name"] = "opencomputer"
-  dev["serial_number"] = computer.address()
-  dev["identifiers"] = { computer.address() }
+  dev["name"] = "opencomputer redstone " .. addr
+  dev["serial_number"] = addr
+  dev["identifiers"] = { addr }
   return dev
 end
 
@@ -117,7 +119,7 @@ local function register_redstone(addr)
   for i=0,15,1 do
     local config = {}
     local c = colors[i]
-    config["device"] = get_device()
+    config["device"] = get_device(addr)
     config["command_topic"] = "oc-computer/" .. addr .. "/" .. i .. "/set"
     config["name"] = "east redstone color " .. colors[i]
     config["platform"] = "switch"
