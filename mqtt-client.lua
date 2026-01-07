@@ -5,6 +5,7 @@ local event = require "event"
 local internet = require("internet")
 local json = require("json")
 local serialization = require("serialization")
+local sides = require("sides")
 
 local mqttLib = require("mqtt-lib")
 
@@ -106,9 +107,9 @@ end
 
 local mqtt = mqttLib:new("10.0.0.11", 1883, "oc", "hunter2", computer.address(), 600)
 
-local function get_device(addr)
+local function get_device(typ, addr)
   local dev = {}
-  dev["name"] = "opencomputer redstone " .. addr
+  dev["name"] = "opencomputer " .. typ .. " " .. addr
   dev["serial_number"] = addr
   dev["identifiers"] = { addr }
   return dev
@@ -119,13 +120,50 @@ local function register_redstone(addr)
   for i=0,15,1 do
     local config = {}
     local c = colors[i]
-    config["device"] = get_device(addr)
+    config["device"] = get_device("redstone", addr)
     config["command_topic"] = "oc-computer/" .. addr .. "/" .. i .. "/set"
     config["name"] = "east redstone color " .. colors[i]
     config["platform"] = "switch"
     config["unique_id"] = addr .. "/" .. i
 
     mqtt:publish("homeassistant/switch/" .. addr .. "/" .. i .. "/config", json:encode(config))
+  end
+end
+
+local function register_transposer(addr)
+  local dev = component.proxy(addr)
+  for side = 0,5,1 do
+    local sidename = sides[side]
+    local o = dev.getFluidInTank(side)
+    if #o > 0 then
+      for k,v in ipairs(o) do
+        local config = {}
+        local topic = "oc-computer/" .. addr .. "/" .. sidename .. "/" .. k .. "/amount"
+        config["device"] = get_device("transposer", addr)
+        config["device_class"] = "volume"
+        config["name"] = sidename .. " transposer " .. addr .. " slot " .. k
+        config["platform"] = "sensor"
+        config["state_topic"] = topic
+        config["unique_id"] = addr .. "/" .. side .. "/" .. k
+        config["unit_of_measurement"] = "mL"
+        mqtt:publish("homeassistant/sensor/" .. addr .. "/config", json:encode(config))
+      end
+    end
+  end
+end
+
+local function scan_transposer(addr)
+  local dev = component.proxy(addr)
+  for side = 0,5,1 do
+    local sidename = sides[side]
+    local o = dev.getFluidInTank(side)
+    if #o > 0 then
+      for k,v in ipairs(o) do
+        local name = v["name"]
+        local topic = "oc-computer/" .. addr .. "/" .. sidename .. "/" .. k .. "/amount"
+        mqtt:publish(topic, v["amount"])
+      end
+    end
   end
 end
 
@@ -140,6 +178,11 @@ local function try(callback)
 end
 
 local function loop()
+  for k,v in component.list() do
+    if v == "transposer" then
+      scan_transposer(k)
+    end
+  end
   mqtt:loop()
 end
 
@@ -171,6 +214,8 @@ local function main()
     print(k,v)
     if v == "redstone" then
       register_redstone(k)
+    elseif v == "transposer" then
+      register_transposer(k)
     end
   end
 
