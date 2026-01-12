@@ -7,6 +7,8 @@ local json = require("json")
 local serialization = require("serialization")
 local sides = require("sides")
 
+local cfg = require("config")
+
 local mqttLib = require("mqtt-lib")
 
 local coroutines = {}
@@ -32,80 +34,9 @@ function escape_unprintables(s)
     return escaped
 end
 
-function be16(num)
-  local L = num % 256
-  local H = num >> 8
-  return string.char(H, L)
-end
 
-function length_prefix_string(str)
-  return be16(string.len(str)) .. str
-end
-
-function varint(num)
-  if num < 128 then
-    return string.char(num)
-  else
-    print("unsupported length", num)
-  end
-end
-
-function create_packet(code, payload)
-  print("packet length", string.len(payload))
-  return string.char(code) .. varint(string.len(payload)) .. payload
-end
-
-function create_connect_packet()
-  local clientid = "opencomputer"
-  local user = "oc";
-  local password = "hunter2"
-
-  local flags = 0xc2 -- user, password, clean session
-  local packet = length_prefix_string("MQTT")
-  packet = packet .. string.char(4) -- MQTT v3.1.1
-  packet = packet .. string.char(flags)
-  packet = packet .. be16(600) -- keep alive
-  packet = packet .. length_prefix_string(clientid)
-  packet = packet .. length_prefix_string(user) .. length_prefix_string(password)
-
-  return create_packet(1 << 4, packet)
-end
-
-function process_one_packet(hnd)
-  print("got packet", hnd)
-  local header = hnd:read(2)
-  print(escape_unprintables(header))
-  local len = string.byte(header, 2)
-  local payload = hnd:read(len)
-  print(escape_unprintables(payload))
-end
-
-
---print(escape_unprintables(t))
-
---print(escape_unprintables(varint(46)))
-
---local handle = internet.open("10.0.0.11", 1883)
---print("opened", handle)
-
---handle:finishConnect()
---print("finished")
-
---handle:write(create_connect_packet())
---print("wrote")
---handle:flush()
-
---event.listen("internet_ready", process_one_packet)
---print("listened")
-
---for i=0,60,1 do
---  os.sleep(1)
---  print("slept")
---end
-
---process_one_packet(handle)
-
-local mqtt = mqttLib:new("10.0.0.11", 1883, "oc", "hunter2", computer.address(), 600)
+local mqtt = mqttLib:new(cfg["server"], 1883, cfg["username"], cfg["password"], computer.address(), 600)
+local avail_topic = "oc-computer/"..computer.address().."/online"
 
 local function get_device(typ, addr)
   local dev = {}
@@ -130,41 +61,58 @@ local function register_redstone(addr)
   end
 end
 
-local function register_transposer(addr)
+local function register_transposer_fluid(addr, name, label)
   local dev = component.proxy(addr)
-  for side = 0,5,1 do
-    local sidename = sides[side]
-    local o = dev.getFluidInTank(side)
-    if #o > 0 then
-      for k,v in ipairs(o) do
-        local config = {}
-        local topic = "oc-computer/" .. addr .. "/" .. sidename .. "/" .. k .. "/amount"
-        config["device"] = get_device("transposer", addr)
-        config["device_class"] = "volume"
-        config["name"] = sidename .. " transposer " .. addr .. " slot " .. k
-        config["platform"] = "sensor"
-        config["state_topic"] = topic
-        config["unique_id"] = addr .. "/" .. side .. "/" .. k
-        config["unit_of_measurement"] = "mL"
-        mqtt:publish("homeassistant/sensor/" .. addr .. "/config", json:encode(config))
-      end
-    end
-  end
+
+  local avail = {}
+  avail["topic"] = avail_topic
+
+  local config = {}
+  local topic = "oc-computer/" .. addr .. "/report"
+  config["device"] = get_device("transposer", addr)
+  config["device_class"] = "volume"
+  config["availability"] = avail
+  config["name"] = label
+  config["platform"] = "sensor"
+  config["state_topic"] = topic
+  config["unique_id"] = addr .. "/" .. name
+  config["unit_of_measurement"] = "mL"
+  config["value_template"] = "{{ value_json." .. name .. " }}"
+  mqtt:publish("homeassistant/sensor/" .. addr .. "_" .. name .. "/config", json:encode(config))
 end
+
+local registered_fluids = {}
 
 local function scan_transposer(addr)
   local dev = component.proxy(addr)
+  local report = {}
+  local names = {}
   for side = 0,5,1 do
     local sidename = sides[side]
     local o = dev.getFluidInTank(side)
     if #o > 0 then
       for k,v in ipairs(o) do
-        local name = v["name"]
-        local topic = "oc-computer/" .. addr .. "/" .. sidename .. "/" .. k .. "/amount"
-        mqtt:publish(topic, v["amount"])
+        if v["name"] ~= nil then
+          names[v["name"]] = v["label"]
+          local name = v["name"]
+          local topic = "oc-computer/" .. addr .. "/" .. sidename .. "/" .. k .. "/amount"
+          if report[v["name"]] == nil then
+            report[v["name"]] = v["amount"]
+          else
+            report[v["name"]] = report[v["name"]] + v["amount"]
+          end
+        end
       end
     end
   end
+  for k,v in pairs(report) do
+    if registered_fluids[k] == nil then
+      print("new fluid to report to HA: " .. names[k])
+      register_transposer_fluid(addr, k, names[k])
+      registered_fluids[k] = true
+    end
+  end
+  mqtt:publish("oc-computer/"..addr.."/report", json:encode(report))
 end
 
 local function try(callback)
@@ -188,12 +136,13 @@ end
 
 local function main()
   print("start")
-  mqtt:registerWillMessage("oc-computer/online", "offline", 0, true)
+  mqtt:registerWillMessage(avail_topic, "offline", 0, true)
   mqtt:registerOnConnect(function ()
     print("connected")
   end)
   mqtt:connect()
-  mqtt:publish("oc-computer/online", "online")
+  loop()
+  mqtt:publish(avail_topic, "online", 0, true)
   mqtt:subscribe("oc-computer/command/+", 0, function (topic, message, topicValues)
     print("topic: " .. topic .. " message: " .. message .. " topicValues: " .. serialization.serialize(topicValues))
   end)
@@ -214,8 +163,6 @@ local function main()
     print(k,v)
     if v == "redstone" then
       register_redstone(k)
-    elseif v == "transposer" then
-      register_transposer(k)
     end
   end
 
