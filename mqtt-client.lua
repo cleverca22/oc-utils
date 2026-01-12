@@ -93,13 +93,12 @@ local function scan_transposer(addr)
     if #o > 0 then
       for k,v in ipairs(o) do
         if v["name"] ~= nil then
-          names[v["name"]] = v["label"]
-          local name = v["name"]
-          local topic = "oc-computer/" .. addr .. "/" .. sidename .. "/" .. k .. "/amount"
-          if report[v["name"]] == nil then
-            report[v["name"]] = v["amount"]
+          local key = v["name"]:gsub("%s","_")
+          names[key] = v["label"]
+          if report[key] == nil then
+            report[key] = v["amount"]
           else
-            report[v["name"]] = report[v["name"]] + v["amount"]
+            report[key] = report[key] + v["amount"]
           end
         end
       end
